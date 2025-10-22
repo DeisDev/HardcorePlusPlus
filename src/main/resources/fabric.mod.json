@@ -13,21 +13,14 @@
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/hardcoreplus/icon.png",
-	"environment": "*",
+	"environment": "server",
 	"entrypoints": {
 		"main": [
 			"insidate.hardcoreplus.Hardcoreplus"
-		],
-		"client": [
-			"insidate.hardcoreplus.HardcoreplusClient"
 		]
 	},
 	"mixins": [
-		"hardcoreplus.mixins.json",
-		{
-			"config": "hardcoreplus.client.mixins.json",
-			"environment": "client"
-		}
+		"hardcoreplus.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.17.3",

@@ -3,7 +3,6 @@
 	"package": "insidate.hardcoreplus.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
-		"ExampleMixin",
 		"PlayerDeathMixin"
 	],
 	"injectors": {

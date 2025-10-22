@@ -21,7 +21,17 @@ public class PlayerDeathMixin {
         ServerPlayerEntity self = (ServerPlayerEntity) (Object) this;
         MinecraftServer server = self.getServer();
 
-    if (server == null) return;
+        if (server == null) return;
+        // Only run this logic on dedicated servers (leave singleplayer vanilla)
+        try {
+            if (!server.isDedicated()) {
+                Hardcoreplus.LOGGER.debug("[hcp mixin] Not a dedicated server; skipping reset behavior");
+                return;
+            }
+        } catch (Throwable ignored) {
+            // If mapping differs or method is unavailable, conservatively do nothing
+            return;
+        }
     Hardcoreplus.LOGGER.debug("[hcp mixin] onDeath invoked for {}", self.getGameProfile().getName());
 
         // SaveProperties / world properties expose whether the world is hardcore
@@ -34,34 +44,18 @@ public class PlayerDeathMixin {
 
             if (!isHardcore) return;
             Hardcoreplus.LOGGER.debug("[hcp mixin] World is hardcore, proceeding to mass-kill");
-
-            // If already processing (we triggered kills), don't re-enter
+            // If already processing (we triggered reset), don't re-enter
             if (!Hardcoreplus.PROCESSING.compareAndSet(false, true)) {
-                Hardcoreplus.LOGGER.debug("[hcp mixin] Mass-kill already in progress; skipping re-entry");
+                Hardcoreplus.LOGGER.debug("[hcp mixin] Reset already in progress; skipping re-entry");
                 return;
             }
 
-            Hardcoreplus.LOGGER.info("[hcp mixin] Initiating mass-kill for all players");
-
-            // Kill every player on the server (except already-dead ones)
-            server.getPlayerManager().getPlayerList().forEach(player -> {
-                try {
-                    if (!player.isDead() && player.isAlive()) {
-                        // Call kill() to mark the entity as dead and trigger death handling
-                            try {
-                                Hardcoreplus.LOGGER.info("[hcp mixin] Killing player: {}", player.getGameProfile().getName());
-                                net.minecraft.server.world.ServerWorld serverWorld = (net.minecraft.server.world.ServerWorld) player.getWorld();
-                                player.kill(serverWorld);
-                            } catch (Throwable t) {
-                                // Fallback: set health to 0
-                                Hardcoreplus.LOGGER.warn("[hcp mixin] kill() failed for {} - falling back to setHealth(0)", player.getGameProfile().getName(), t);
-                                try { player.setHealth(0.0F); } catch (Throwable ignored) {}
-                            }
-                    }
-                } catch (Throwable t) {
-                    Hardcoreplus.LOGGER.warn("[hcp mixin] Exception while attempting to kill player {}", player.getGameProfile().getName(), t);
-                }
-            });
+            Hardcoreplus.LOGGER.info("[hcp mixin] All players dead in hardcore world — requesting reset and server stop");
+            try {
+                Hardcoreplus.requestResetAndStop(server);
+            } finally {
+                Hardcoreplus.PROCESSING.set(false);
+            }
         } finally {
             Hardcoreplus.PROCESSING.set(false);
             Hardcoreplus.LOGGER.debug("[hcp mixin] Mass-kill processing flag cleared");
