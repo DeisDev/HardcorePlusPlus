@@ -60,7 +60,7 @@ public class PlayerDeathMixin {
 
             Hardcoreplus.LOGGER.info("[hcp mixin] All players dead in hardcore world — requesting reset and server stop");
             try {
-                Hardcoreplus.requestResetAndStop(server);
+                Hardcoreplus.requestResetAndStop(server, self.getGameProfile().getName());
             } catch (Throwable t) {
                 Hardcoreplus.LOGGER.error("[hcp mixin] requestResetAndStop failed", t);
             }

@@ -6,6 +6,7 @@ import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,10 @@ public class Hardcoreplus implements ModInitializer {
 
 	// Shared guard used by the mixin and the debug command to prevent re-entrant mass-kills
 	public static final AtomicBoolean PROCESSING = new AtomicBoolean(false);
+
+	// Track current world's start time and name to compute lifetime durations
+	public static volatile long WORLD_START_MILLIS = 0L;
+	public static volatile String CURRENT_LEVEL_NAME = "world";
 
 	// Pending confirmation map for two-step dangerous commands (UUID -> expiryMillis)
 	private static final UUID CONSOLE_UUID = new UUID(0L, 0L);
@@ -294,7 +299,7 @@ public class Hardcoreplus implements ModInitializer {
 							"  delete_instead_of_backup=" + ConfigManager.getBoolean("delete_instead_of_backup"),
 							"  backup_folder_name=" + String.valueOf(ConfigManager.get("backup_folder_name")),
 							"  backup_name_format=" + String.valueOf(ConfigManager.get("backup_name_format")),
-							"  restart_delay_seconds=" + ConfigManager.getInt("restart_delay_seconds", 5),
+							"  restart_delay_seconds=" + ConfigManager.getInt("restart_delay_seconds", 10),
 							"  auto_restart=" + ConfigManager.getBoolean("auto_restart")
 						);
 						source.sendFeedback(() -> Text.literal(msg2), false);
@@ -386,6 +391,7 @@ public class Hardcoreplus implements ModInitializer {
 						sb.append("HardcorePlus+ commands:\n");
 						sb.append("  /hcp status - Show hardcore/processing/players\n");
 						sb.append("  /hcp preview - Show next world name and seed\n");
+						sb.append("  /hcp time - Show current world time and real uptime\n");
 						if (isOp) {
 							sb.append("  /hcp masskill - Request mass-kill (confirm required)\n");
 							sb.append("  /hcp masskill confirm - Confirm mass-kill\n");
@@ -399,12 +405,109 @@ public class Hardcoreplus implements ModInitializer {
 						src.sendFeedback(() -> Text.literal(sb.toString()), false);
 						return 1;
 					}))
+					.then(CommandManager.literal("time").requires(src -> src.hasPermissionLevel(0)).executes(ctx -> {
+						ServerCommandSource source = ctx.getSource();
+						MinecraftServer server = source.getServer();
+						if (server == null) {
+							source.sendFeedback(() -> Text.literal("Server not available."), false);
+							return 0;
+						}
+						net.minecraft.server.world.ServerWorld world = null;
+						try { world = server.getOverworld(); } catch (Throwable ignored) {}
+						if (world == null) {
+							source.sendFeedback(() -> Text.literal("World not available."), false);
+							return 0;
+						}
+						long todFull;
+						long timeTotal;
+						try {
+							todFull = world.getTimeOfDay();
+							timeTotal = world.getTime();
+						} catch (Throwable t) {
+							// Fallback in case mappings differ
+							todFull = 0L;
+							timeTotal = 0L;
+						}
+						long tod = Math.floorMod(todFull, 24000L);
+						long day = Math.floorDiv(todFull, 24000L);
+						long hour = (tod / 1000L + 6L) % 24L; // 0 ticks corresponds to 06:00
+						long minute = (tod % 1000L) * 60L / 1000L;
+						String mcClock = String.format("Day %d, %02d:%02d", day, hour, minute);
+
+						long uptimeMs = 0L;
+						long start = WORLD_START_MILLIS;
+						if (start > 0) uptimeMs = System.currentTimeMillis() - start;
+						String uptime = formatDuration(uptimeMs);
+
+						Text msg = Text.empty()
+							.append(Text.literal("World Time: ").formatted(Formatting.GRAY))
+							.append(Text.literal(mcClock).formatted(Formatting.AQUA, Formatting.BOLD))
+							.append(Text.literal("  ").formatted(Formatting.DARK_GRAY))
+							.append(Text.literal("Ticks: ").formatted(Formatting.GRAY))
+							.append(Text.literal(Long.toString(timeTotal)).formatted(Formatting.YELLOW))
+							.append(Text.literal("  ").formatted(Formatting.DARK_GRAY))
+							.append(Text.literal("Uptime: ").formatted(Formatting.GRAY))
+							.append(Text.literal(uptime).formatted(Formatting.GOLD));
+
+						source.sendFeedback(() -> msg, false);
+						return 1;
+					}))
 					.executes(ctx -> {
 						ctx.getSource().sendFeedback(() -> Text.literal("Use /hcp help for available commands."), false);
 						return 1;
 					})
 			);
 			LOGGER.info("[hcp] Registered /hcp commands (masskill, status, config, preview, reload, help)");
+		});
+
+		// After server has started and the world is loaded, record or restore world start time
+		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			try {
+				java.nio.file.Path runDir = server.getRunDirectory();
+				java.nio.file.Path propsFile = runDir.resolve("server.properties");
+				String levelName = "world";
+				try {
+					if (java.nio.file.Files.exists(propsFile)) {
+						java.util.Properties p = new java.util.Properties();
+						try (java.io.InputStream in = java.nio.file.Files.newInputStream(propsFile)) { p.load(in); }
+						levelName = java.util.Optional.ofNullable(p.getProperty("level-name")).orElse(levelName);
+					}
+				} catch (Throwable ignored) {}
+
+				CURRENT_LEVEL_NAME = levelName;
+
+				java.nio.file.Path worldStart = runDir.resolve("hc_world_start.flag");
+				long start = System.currentTimeMillis();
+				boolean matched = false;
+				try {
+					if (java.nio.file.Files.exists(worldStart)) {
+						java.util.Properties pp = new java.util.Properties();
+						try (java.io.Reader r = java.nio.file.Files.newBufferedReader(worldStart)) { pp.load(r); }
+						String ln = pp.getProperty("level-name");
+						String st = pp.getProperty("start");
+						if (ln != null && ln.equals(levelName) && st != null) {
+							try { start = Long.parseLong(st); matched = true; } catch (NumberFormatException ignored) {}
+						}
+					}
+				} catch (Throwable ignored) {}
+
+				// Write current mapping to file (new or updated)
+				try {
+					java.util.Properties out = new java.util.Properties();
+					out.setProperty("level-name", levelName);
+					out.setProperty("start", Long.toString(start));
+					try (java.io.Writer w = java.nio.file.Files.newBufferedWriter(worldStart)) {
+						out.store(w, "HardcorePlus+ world start timestamp");
+					}
+				} catch (Throwable t) {
+					LOGGER.warn("Failed to write world start flag", t);
+				}
+
+				WORLD_START_MILLIS = start;
+				LOGGER.info("World '{}' start time set{}: {}", levelName, matched ? " (restored)" : "", new java.util.Date(start));
+			} catch (Throwable t) {
+				LOGGER.warn("Failed to initialize world start tracking", t);
+			}
 		});
 	}
 
@@ -519,26 +622,89 @@ public class Hardcoreplus implements ModInitializer {
 			LOGGER.info("Wrote hc_reset.flag at {} with rotation metadata", marker.toAbsolutePath());
 
 			boolean autoRestart = ConfigManager.getBoolean("auto_restart");
-			int delay = ConfigManager.getInt("restart_delay_seconds", 5);
+			int delay = ConfigManager.getInt("restart_delay_seconds", 10);
 
-			// Stop server gracefully on server thread
+			// Schedule server stop without blocking the server thread (avoid freezing the world)
+			LOGGER.info("HardcorePlus+ initiating server stop for reset in {} seconds", delay);
 			try {
-				server.execute(() -> {
-					LOGGER.info("HardcorePlus+ initiating server stop for reset in {} seconds", delay);
+				Thread t = new Thread(() -> {
 					try { Thread.sleep(delay * 1000L); } catch (InterruptedException ignored) {}
-					server.stop(false);
-					if (autoRestart) {
-						// Some server hosts expect a wrapper to restart; we just exit normally.
-						LOGGER.info("auto_restart is true; server process should be restarted by wrapper if present");
+					try {
+						server.execute(() -> {
+							server.stop(false);
+							if (autoRestart) {
+								LOGGER.info("auto_restart is true; server process should be restarted by wrapper if present");
+							}
+						});
+					} catch (Throwable ex) {
+						LOGGER.error("Failed to stop server after delay", ex);
 					}
-				});
+				}, "hcp-restart-timer");
+				t.setDaemon(true);
+				t.start();
 			} catch (Throwable t) {
-				LOGGER.warn("Failed to schedule server stop on server thread; invoking stop directly", t);
+				LOGGER.warn("Failed to start restart timer thread; stopping immediately as fallback", t);
 				try { server.stop(false); } catch (Throwable ex) { LOGGER.error("Failed to stop server", ex); }
 			}
 		} catch (Throwable t) {
 			LOGGER.error("Exception while requesting reset and stop", t);
 		}
+	}
+
+	/**
+	 * Variant that also broadcasts a single restart notice naming the triggering player.
+	 * Ensures the message is only sent if a reset has not already been scheduled.
+	 */
+	public static void requestResetAndStop(MinecraftServer server, String triggeringPlayerName) {
+		if (server == null) return;
+		try {
+			if (!server.isDedicated()) return;
+		} catch (Throwable ignored) { return; }
+		try { ConfigManager.reload(); } catch (Throwable ignored) {}
+		try {
+			java.nio.file.Path runDir = server.getRunDirectory();
+			java.nio.file.Path existingMarker = runDir.resolve("hc_reset.flag");
+			if (java.nio.file.Files.exists(existingMarker)) {
+				LOGGER.debug("Reset already scheduled; suppressing duplicate restart announcement");
+				return;
+			}
+			int delay = ConfigManager.getInt("restart_delay_seconds", 10);
+			String name = (triggeringPlayerName != null && !triggeringPlayerName.isBlank()) ? triggeringPlayerName : "A player";
+			// Compute world lifetime since start
+			long startMs = WORLD_START_MILLIS;
+			if (startMs <= 0) {
+				try {
+					java.util.Properties pp = new java.util.Properties();
+					java.nio.file.Path worldStart = runDir.resolve("hc_world_start.flag");
+					if (java.nio.file.Files.exists(worldStart)) {
+						try (java.io.Reader r = java.nio.file.Files.newBufferedReader(worldStart)) { pp.load(r); }
+						String ln = pp.getProperty("level-name");
+						String st = pp.getProperty("start");
+						if (ln != null && st != null && ln.equals(CURRENT_LEVEL_NAME)) {
+							try { startMs = Long.parseLong(st); } catch (NumberFormatException ignored) {}
+						}
+					}
+				} catch (Throwable ignored) {}
+			}
+			String dur = formatDuration(Math.max(0L, System.currentTimeMillis() - Math.max(0L, startMs)));
+			try {
+				Text msg = Text.empty()
+					.append(Text.literal(name).formatted(Formatting.GOLD, Formatting.BOLD))
+					.append(Text.literal(" has died. ").formatted(Formatting.RED))
+					.append(Text.literal("World lasted ").formatted(Formatting.GRAY))
+					.append(Text.literal(dur).formatted(Formatting.AQUA, Formatting.BOLD))
+					.append(Text.literal(". Restart in ").formatted(Formatting.GRAY))
+					.append(Text.literal(Integer.toString(delay)).formatted(Formatting.YELLOW, Formatting.BOLD))
+					.append(Text.literal(" seconds.").formatted(Formatting.GRAY));
+				server.getPlayerManager().broadcast(msg, false);
+			} catch (Throwable t) {
+				LOGGER.warn("Failed to broadcast restart message", t);
+			}
+		} catch (Throwable t) {
+			LOGGER.warn("Announcement pre-check failed; proceeding with reset request", t);
+		}
+		// Delegate to the main implementation which performs rotation and schedules stop
+		requestResetAndStop(server);
 	}
 
 	/**
@@ -585,5 +751,15 @@ public class Hardcoreplus implements ModInitializer {
 			t = t.substring(0, t.length() - 1);
 		}
 		return t.isEmpty() ? ("world_" + System.currentTimeMillis()) : t;
+	}
+
+	// Format a duration in milliseconds as HH:mm:ss (hours may exceed 24)
+	private static String formatDuration(long millis) {
+		if (millis < 0) millis = 0;
+		long seconds = millis / 1000;
+		long s = seconds % 60;
+		long minutes = (seconds / 60) % 60;
+		long hours = (seconds / 3600);
+		return String.format("%02d:%02d:%02d", hours, minutes, s);
 	}
 }

@@ -134,7 +134,7 @@ public class ConfigManager {
         p.setProperty("confirm_timeout_ms", "30000");
         // Restart
         p.setProperty("auto_restart", "true");
-        p.setProperty("restart_delay_seconds", "5");
+    p.setProperty("restart_delay_seconds", "10");
         p.setProperty("restart_command", "");
         // World Rotation
         p.setProperty("new_level_name_format", "%name%_%time%");
