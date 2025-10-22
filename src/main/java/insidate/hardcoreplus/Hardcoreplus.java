@@ -262,8 +262,20 @@ public class Hardcoreplus implements ModInitializer {
 						boolean isHardcore = false;
 						if (server.getSaveProperties() != null) isHardcore = server.getSaveProperties().isHardcore();
 
-						String msg = String.format("Hardcore: %s, Processing: %s, Online players: %d",
-								isHardcore, PROCESSING.get(), server.getPlayerManager().getPlayerList().size());
+						// Also read server.properties 'hardcore' for comparison
+						boolean propsHardcore = false;
+						try {
+							java.nio.file.Path propsFile = server.getRunDirectory().resolve("server.properties");
+							if (java.nio.file.Files.exists(propsFile)) {
+								java.util.Properties p = new java.util.Properties();
+								try (java.io.InputStream in = java.nio.file.Files.newInputStream(propsFile)) { p.load(in); }
+								String hv = p.getProperty("hardcore");
+								if (hv != null) propsHardcore = hv.equalsIgnoreCase("true") || hv.equalsIgnoreCase("1") || hv.equalsIgnoreCase("yes");
+							}
+						} catch (Throwable ignored) {}
+
+						String msg = String.format("Hardcore (world): %s, server.properties: %s, Processing: %s, Online players: %d",
+								isHardcore, propsHardcore, PROCESSING.get(), server.getPlayerManager().getPlayerList().size());
 						source.sendFeedback(() -> Text.literal(msg), false);
 						return 1;
 					}))
@@ -332,6 +344,30 @@ public class Hardcoreplus implements ModInitializer {
 						ctx.getSource().sendFeedback(() -> Text.literal("HardcorePlus+ config reloaded."), false);
 						return 1;
 					}))
+					.then(CommandManager.literal("reset").requires(src -> src.hasPermissionLevel(2))
+						.then(CommandManager.literal("confirm").executes(ctx -> {
+							ServerCommandSource source = ctx.getSource();
+							MinecraftServer server = source.getServer();
+							if (server == null) {
+								source.sendFeedback(() -> Text.literal("Server not available."), false);
+								return 0;
+							}
+							// Execute rotation immediately regardless of current hardcore status
+							requestResetAndStop(server);
+							source.sendFeedback(() -> Text.literal("Reset scheduled. Server will stop shortly."), false);
+							return 1;
+						}))
+						.executes(ctx -> {
+							ServerCommandSource source = ctx.getSource();
+							// simple confirm gate (reuse map)
+							UUID who = CONSOLE_UUID;
+							try { if (source.getEntity() != null) who = source.getEntity().getUuid(); } catch (Throwable ignored) {}
+							long expiry = System.currentTimeMillis() + CONFIRM_TIMEOUT_MS;
+							PENDING_CONFIRM.put(who, expiry);
+							source.sendFeedback(() -> Text.literal("Reset requested. Confirm with /hcp reset confirm within 30 seconds."), false);
+							return 1;
+						})
+					)
 					.then(CommandManager.literal("help").requires(src -> src.hasPermissionLevel(0)).executes(ctx -> {
 						ServerCommandSource src = ctx.getSource();
 						boolean isOp = false;
@@ -343,10 +379,12 @@ public class Hardcoreplus implements ModInitializer {
 						if (isOp) {
 							sb.append("  /hcp masskill - Request mass-kill (confirm required)\n");
 							sb.append("  /hcp masskill confirm - Confirm mass-kill\n");
+							sb.append("  /hcp reset - Schedule world rotation (confirm required)\n");
+							sb.append("  /hcp reset confirm - Confirm rotation and stop server\n");
 							sb.append("  /hcp config - Show effective config\n");
 							sb.append("  /hcp reload - Reload config file\n");
 						} else {
-							sb.append("  (Op-only) masskill, config, reload\n");
+							sb.append("  (Op-only) masskill, reset, config, reload\n");
 						}
 						src.sendFeedback(() -> Text.literal(sb.toString()), false);
 						return 1;
