@@ -32,7 +32,13 @@ public class PlayerDeathMixin {
             // If mapping differs or method is unavailable, conservatively do nothing
             return;
         }
-    Hardcoreplus.LOGGER.debug("[hcp mixin] onDeath invoked for {}", self.getGameProfile().getName());
+        // If we're already processing a mass-death/reset, do nothing (guard against re-entrancy)
+        if (Hardcoreplus.PROCESSING.get()) {
+            Hardcoreplus.LOGGER.debug("[hcp mixin] Already processing; ignoring onDeath for {}", self.getGameProfile().getName());
+            return;
+        }
+
+        Hardcoreplus.LOGGER.debug("[hcp mixin] onDeath invoked for {}", self.getGameProfile().getName());
 
         // SaveProperties / world properties expose whether the world is hardcore
         try {
@@ -59,8 +65,7 @@ public class PlayerDeathMixin {
                 Hardcoreplus.LOGGER.error("[hcp mixin] requestResetAndStop failed", t);
             }
         } finally {
-            Hardcoreplus.PROCESSING.set(false);
-            Hardcoreplus.LOGGER.debug("[hcp mixin] Mass-kill processing flag cleared");
+            // Do not manipulate PROCESSING flag here; it is managed centrally by performMassKill
         }
     }
 }

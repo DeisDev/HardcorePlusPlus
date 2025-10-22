@@ -314,6 +314,16 @@ public class Hardcoreplus implements ModInitializer {
 							}
 						} catch (Throwable ignored) {}
 
+						// Prefer a stable base name if recorded
+						String baseLevelName2 = oldLevelName2;
+						try {
+							java.nio.file.Path baseFile = source.getServer().getRunDirectory().resolve("hc_base_name.txt");
+							if (java.nio.file.Files.exists(baseFile)) {
+								String tmp = java.nio.file.Files.readString(baseFile).trim();
+								if (!tmp.isEmpty()) baseLevelName2 = tmp;
+							}
+						} catch (Throwable ignored) {}
+
 						String timePattern = ConfigManager.get("time_format");
 						if (timePattern == null || timePattern.isBlank()) timePattern = "HH-mm-ss_uuuu-MM-dd";
 						java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern(timePattern).withZone(java.time.ZoneId.systemDefault());
@@ -321,7 +331,7 @@ public class Hardcoreplus implements ModInitializer {
 						String nameFormat = ConfigManager.get("new_level_name_format");
 						if (nameFormat == null || nameFormat.isBlank()) nameFormat = "%name%_%time%";
 						String id = java.util.UUID.randomUUID().toString().substring(0, 8);
-						String newLevelName2 = nameFormat.replace("%name%", oldLevelName2).replace("%time%", timeStr).replace("%id%", id);
+						String newLevelName2 = nameFormat.replace("%name%", baseLevelName2).replace("%time%", timeStr).replace("%id%", id);
 						newLevelName2 = sanitizeName(newLevelName2);
 
 						String seedInfo2 = "(unchanged)";
@@ -418,12 +428,35 @@ public class Hardcoreplus implements ModInitializer {
 			// Reload config at reset time so live edits are honored during rotation
 			try { ConfigManager.reload(); } catch (Throwable ignored) {}
 			java.nio.file.Path runDir = server.getRunDirectory();
+			// If a reset is already scheduled, avoid duplicate scheduling and repeated name appends
+			java.nio.file.Path existingMarker = runDir.resolve("hc_reset.flag");
+			if (java.nio.file.Files.exists(existingMarker)) {
+				LOGGER.warn("hc_reset.flag already exists; a reset is already scheduled. Skipping duplicate request.");
+				return;
+			}
 			java.nio.file.Path propsFile = runDir.resolve("server.properties");
 			java.util.Properties p = new java.util.Properties();
 			String oldLevelName = "world";
 			if (Files.exists(propsFile)) {
 				try (java.io.InputStream in = Files.newInputStream(propsFile)) { p.load(in); }
 				oldLevelName = java.util.Optional.ofNullable(p.getProperty("level-name")).orElse(oldLevelName);
+			}
+
+			// Determine a stable base level-name to prevent compounded time suffixes across rotations
+			java.nio.file.Path baseFile = runDir.resolve("hc_base_name.txt");
+			String baseLevelName = oldLevelName;
+			try {
+				if (java.nio.file.Files.exists(baseFile)) {
+					baseLevelName = java.nio.file.Files.readString(baseFile).trim();
+					if (baseLevelName.isEmpty()) baseLevelName = oldLevelName;
+				} else {
+					// First rotation: persist the current level-name as the base for future rotations
+					java.nio.file.Files.writeString(baseFile, baseLevelName, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+					LOGGER.info("Saved base level-name '{}' to {}", baseLevelName, baseFile.toAbsolutePath());
+				}
+			} catch (Throwable t) {
+				LOGGER.warn("Failed to read/write base level-name; using current level-name as base", t);
+				baseLevelName = oldLevelName;
 			}
 
 			// Generate a new human-readable level-name using configurable format
@@ -434,7 +467,7 @@ public class Hardcoreplus implements ModInitializer {
 			String nameFormat = ConfigManager.get("new_level_name_format");
 			if (nameFormat == null || nameFormat.isBlank()) nameFormat = "%name%_%time%";
 			String id = java.util.UUID.randomUUID().toString().substring(0, 8);
-			String newLevelName = nameFormat.replace("%name%", oldLevelName).replace("%time%", timeStr).replace("%id%", id);
+			String newLevelName = nameFormat.replace("%name%", baseLevelName).replace("%time%", timeStr).replace("%id%", id);
 			newLevelName = sanitizeName(newLevelName);
 			p.setProperty("level-name", newLevelName);
 
@@ -478,6 +511,7 @@ public class Hardcoreplus implements ModInitializer {
 			markerProps.setProperty("time", Long.toString(System.currentTimeMillis()));
 			markerProps.setProperty("old-level-name", oldLevelName);
 			markerProps.setProperty("new-level-name", newLevelName);
+			markerProps.setProperty("base-level-name", baseLevelName);
 			if (newSeedWritten != null) markerProps.setProperty("new-seed", newSeedWritten);
 			try (java.io.Writer w = Files.newBufferedWriter(marker)) {
 				markerProps.store(w, "HardcorePlus+ world rotation metadata");
