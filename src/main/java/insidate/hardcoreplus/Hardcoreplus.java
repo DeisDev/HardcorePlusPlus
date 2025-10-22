@@ -54,6 +54,8 @@ public class Hardcoreplus implements ModInitializer {
 				// If method unavailable, conservatively skip
 				return;
 			}
+			// Reload config at startup to pick up live edits before handling rotation
+			try { ConfigManager.reload(); } catch (Throwable ignored) {}
 				try {
 				java.nio.file.Path runDir = server.getRunDirectory();
 				java.nio.file.Path marker = runDir.resolve("hc_reset.flag");
@@ -61,15 +63,30 @@ public class Hardcoreplus implements ModInitializer {
 
 				LOGGER.info("hc_reset.flag detected; preparing to rotate world");
 
-				// determine level name
+				// determine OLD level name from marker (preferred) or fall back to server.properties
 				String levelName = "world";
-				java.nio.file.Path propsFile = runDir.resolve("server.properties");
-				if (Files.exists(propsFile)) {
-					try {
-						Properties p = new Properties();
-						p.load(Files.newInputStream(propsFile));
-						levelName = Optional.ofNullable(p.getProperty("level-name")).orElse(levelName);
-					} catch (IOException ignored) {}
+				try {
+					Properties markerProps = new Properties();
+					try (java.io.Reader r = Files.newBufferedReader(marker)) {
+						markerProps.load(r);
+					}
+					String fromMarker = markerProps.getProperty("old-level-name");
+					if (fromMarker != null && !fromMarker.isBlank()) {
+						levelName = fromMarker;
+					}
+				} catch (IOException ignored) {
+					// ignore; will fallback to server.properties
+				}
+
+				if ("world".equals(levelName)) {
+					java.nio.file.Path propsFile = runDir.resolve("server.properties");
+					if (Files.exists(propsFile)) {
+						try {
+							Properties p = new Properties();
+							p.load(Files.newInputStream(propsFile));
+							levelName = Optional.ofNullable(p.getProperty("level-name")).orElse(levelName);
+						} catch (IOException ignored) {}
+					}
 				}
 
 				java.nio.file.Path worldDir = runDir.resolve(levelName);
@@ -90,12 +107,44 @@ public class Hardcoreplus implements ModInitializer {
 						String id = java.util.UUID.randomUUID().toString().substring(0, 8);
 						String backupName = format.replace("%name%", levelName).replace("%ts%", ts).replace("%id%", id);
 						java.nio.file.Path backupTarget = backupRoot.resolve(backupName);
+						boolean moved = false;
 						try {
 							Files.move(worldDir, backupTarget, StandardCopyOption.ATOMIC_MOVE);
 							LOGGER.info("Moved old world to {}", backupTarget.toAbsolutePath());
+							moved = true;
 						} catch (IOException e) {
-							LOGGER.warn("Failed to move world to backup; attempting non-atomic move", e);
-							try { Files.move(worldDir, backupTarget); } catch (IOException ex) { LOGGER.error("Failed to move old world", ex); }
+							LOGGER.warn("Failed to move world to backup atomically; attempting non-atomic move", e);
+							try { Files.move(worldDir, backupTarget); moved = true; } catch (IOException ex) { LOGGER.warn("Non-atomic move failed; will attempt copy fallback", ex); }
+						}
+
+						if (!moved) {
+							// Fallback: copy recursively then delete source
+							try {
+								Files.walk(worldDir).forEach(source -> {
+									try {
+										java.nio.file.Path dest = backupTarget.resolve(worldDir.relativize(source));
+										if (Files.isDirectory(source)) {
+											if (!Files.exists(dest)) Files.createDirectories(dest);
+										} else {
+											// Skip session.lock and continue on copy errors
+											if (source.getFileName().toString().equalsIgnoreCase("session.lock")) {
+												LOGGER.info("Skipping locked file during backup copy: {}", source);
+												return;
+											}
+											Files.copy(source, dest);
+										}
+									} catch (IOException ex) { LOGGER.warn("Error copying file to backup (continuing): {}", source); }
+								});
+								// After copy, delete original
+								Files.walk(worldDir)
+										.sorted((a, b) -> b.compareTo(a))
+										.forEach(p -> {
+											try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+										});
+								LOGGER.info("Copied old world to {} and deleted original", backupTarget.toAbsolutePath());
+							} catch (IOException ex) {
+								LOGGER.error("Failed to copy-and-delete old world to backup", ex);
+							}
 						}
 					} else {
 						// delete
@@ -218,7 +267,96 @@ public class Hardcoreplus implements ModInitializer {
 						source.sendFeedback(() -> Text.literal(msg), false);
 						return 1;
 					}))
+					.then(CommandManager.literal("config").requires(src -> src.hasPermissionLevel(2)).executes(ctx -> {
+						// Show effective config values
+						try { ConfigManager.reload(); } catch (Throwable ignored) {}
+						ServerCommandSource source = ctx.getSource();
+						String msg2 = String.join("\n",
+							"HardcorePlus+ config:",
+							"  new_level_name_format=" + String.valueOf(ConfigManager.get("new_level_name_format")),
+							"  time_format=" + String.valueOf(ConfigManager.get("time_format")),
+							"  force_new_seed=" + ConfigManager.getBoolean("force_new_seed"),
+							"  seed_mode=" + String.valueOf(ConfigManager.get("seed_mode")),
+							"  custom_seed=" + String.valueOf(ConfigManager.get("custom_seed")),
+							"  backup_old_worlds=" + ConfigManager.getBoolean("backup_old_worlds"),
+							"  delete_instead_of_backup=" + ConfigManager.getBoolean("delete_instead_of_backup"),
+							"  backup_folder_name=" + String.valueOf(ConfigManager.get("backup_folder_name")),
+							"  backup_name_format=" + String.valueOf(ConfigManager.get("backup_name_format")),
+							"  restart_delay_seconds=" + ConfigManager.getInt("restart_delay_seconds", 5),
+							"  auto_restart=" + ConfigManager.getBoolean("auto_restart")
+						);
+						source.sendFeedback(() -> Text.literal(msg2), false);
+						return 1;
+					}))
+					.then(CommandManager.literal("preview").requires(src -> src.hasPermissionLevel(0)).executes(ctx -> {
+						// Preview next world name and seed without writing
+						try { ConfigManager.reload(); } catch (Throwable ignored) {}
+						ServerCommandSource source = ctx.getSource();
+						String oldLevelName2 = "world";
+						try {
+							java.nio.file.Path propsFile = source.getServer().getRunDirectory().resolve("server.properties");
+							if (java.nio.file.Files.exists(propsFile)) {
+								java.util.Properties p = new java.util.Properties();
+								try (java.io.InputStream in = java.nio.file.Files.newInputStream(propsFile)) { p.load(in); }
+								oldLevelName2 = java.util.Optional.ofNullable(p.getProperty("level-name")).orElse(oldLevelName2);
+							}
+						} catch (Throwable ignored) {}
+
+						String timePattern = ConfigManager.get("time_format");
+						if (timePattern == null || timePattern.isBlank()) timePattern = "HH-mm-ss_uuuu-MM-dd";
+						java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern(timePattern).withZone(java.time.ZoneId.systemDefault());
+						String timeStr = fmt.format(java.time.Instant.now());
+						String nameFormat = ConfigManager.get("new_level_name_format");
+						if (nameFormat == null || nameFormat.isBlank()) nameFormat = "%name%_%time%";
+						String id = java.util.UUID.randomUUID().toString().substring(0, 8);
+						String newLevelName2 = nameFormat.replace("%name%", oldLevelName2).replace("%time%", timeStr).replace("%id%", id);
+						newLevelName2 = sanitizeName(newLevelName2);
+
+						String seedInfo2 = "(unchanged)";
+						if (ConfigManager.getBoolean("force_new_seed")) {
+							String seedMode = String.valueOf(ConfigManager.get("seed_mode")).trim().toLowerCase();
+							if (seedMode.equals("custom")) {
+								String customSeed = String.valueOf(ConfigManager.get("custom_seed"));
+								if (customSeed != null && !customSeed.isBlank()) seedInfo2 = customSeed; else seedInfo2 = "<empty custom_seed> -> random";
+							} else {
+								seedInfo2 = Long.toString(java.util.concurrent.ThreadLocalRandom.current().nextLong());
+							}
+						}
+
+						String msg3 = "Preview rotation => new level-name: '" + newLevelName2 + "', seed: " + seedInfo2;
+						ctx.getSource().sendFeedback(() -> Text.literal(msg3), false);
+						return 1;
+					}))
+					.then(CommandManager.literal("reload").requires(src -> src.hasPermissionLevel(2)).executes(ctx -> {
+						ConfigManager.reload();
+						ctx.getSource().sendFeedback(() -> Text.literal("HardcorePlus+ config reloaded."), false);
+						return 1;
+					}))
+					.then(CommandManager.literal("help").requires(src -> src.hasPermissionLevel(0)).executes(ctx -> {
+						ServerCommandSource src = ctx.getSource();
+						boolean isOp = false;
+						try { isOp = src.hasPermissionLevel(2); } catch (Throwable ignored) {}
+						StringBuilder sb = new StringBuilder();
+						sb.append("HardcorePlus+ commands:\n");
+						sb.append("  /hcp status - Show hardcore/processing/players\n");
+						sb.append("  /hcp preview - Show next world name and seed\n");
+						if (isOp) {
+							sb.append("  /hcp masskill - Request mass-kill (confirm required)\n");
+							sb.append("  /hcp masskill confirm - Confirm mass-kill\n");
+							sb.append("  /hcp config - Show effective config\n");
+							sb.append("  /hcp reload - Reload config file\n");
+						} else {
+							sb.append("  (Op-only) masskill, config, reload\n");
+						}
+						src.sendFeedback(() -> Text.literal(sb.toString()), false);
+						return 1;
+					}))
+					.executes(ctx -> {
+						ctx.getSource().sendFeedback(() -> Text.literal("Use /hcp help for available commands."), false);
+						return 1;
+					})
 			);
+			LOGGER.info("[hcp] Registered /hcp commands (masskill, status, config, preview, reload, help)");
 		});
 	}
 
@@ -239,16 +377,74 @@ public class Hardcoreplus implements ModInitializer {
 			return;
 		}
 		try {
+			// Reload config at reset time so live edits are honored during rotation
+			try { ConfigManager.reload(); } catch (Throwable ignored) {}
 			java.nio.file.Path runDir = server.getRunDirectory();
-			java.nio.file.Path marker = runDir.resolve("hc_reset.flag");
-			String info = "requestedBy=mod time=" + System.currentTimeMillis();
-			try {
-				Files.writeString(marker, info);
-				LOGGER.info("Wrote hc_reset.flag at {}", marker.toAbsolutePath());
-			} catch (IOException e) {
-				LOGGER.error("Failed to write reset marker", e);
-				return;
+			java.nio.file.Path propsFile = runDir.resolve("server.properties");
+			java.util.Properties p = new java.util.Properties();
+			String oldLevelName = "world";
+			if (Files.exists(propsFile)) {
+				try (java.io.InputStream in = Files.newInputStream(propsFile)) { p.load(in); }
+				oldLevelName = java.util.Optional.ofNullable(p.getProperty("level-name")).orElse(oldLevelName);
 			}
+
+			// Generate a new human-readable level-name using configurable format
+			String timePattern = ConfigManager.get("time_format");
+			if (timePattern == null || timePattern.isBlank()) timePattern = "HH-mm-ss_uuuu-MM-dd";
+			java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern(timePattern).withZone(java.time.ZoneId.systemDefault());
+			String timeStr = fmt.format(java.time.Instant.now());
+			String nameFormat = ConfigManager.get("new_level_name_format");
+			if (nameFormat == null || nameFormat.isBlank()) nameFormat = "%name%_%time%";
+			String id = java.util.UUID.randomUUID().toString().substring(0, 8);
+			String newLevelName = nameFormat.replace("%name%", oldLevelName).replace("%time%", timeStr).replace("%id%", id);
+			newLevelName = sanitizeName(newLevelName);
+			p.setProperty("level-name", newLevelName);
+
+			// Optionally force a new seed by writing an explicit level-seed in server.properties
+			String newSeedWritten = null;
+			boolean forceNewSeed = ConfigManager.getBoolean("force_new_seed");
+			if (forceNewSeed) {
+				String seedMode = ConfigManager.get("seed_mode");
+				if (seedMode == null) seedMode = "random";
+				seedMode = seedMode.trim().toLowerCase();
+				if (seedMode.equals("custom")) {
+					String customSeed = ConfigManager.get("custom_seed");
+					if (customSeed != null && !customSeed.isBlank()) {
+						p.setProperty("level-seed", customSeed);
+						newSeedWritten = customSeed;
+					} else {
+						LOGGER.warn("[hcp] seed_mode=custom but custom_seed is empty; falling back to random seed");
+						long newSeed = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+						p.setProperty("level-seed", Long.toString(newSeed));
+						newSeedWritten = Long.toString(newSeed);
+					}
+				} else {
+					long newSeed = java.util.concurrent.ThreadLocalRandom.current().nextLong();
+					p.setProperty("level-seed", Long.toString(newSeed));
+					newSeedWritten = Long.toString(newSeed);
+				}
+			}
+
+			// Persist updated server.properties
+			try (java.io.OutputStream out = Files.newOutputStream(propsFile, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
+				p.store(out, "server.properties (modified by HardcorePlus+ to rotate world: new level-name and optional seed)");
+			}
+			LOGGER.info("Prepared rotation: old-level-name='{}' -> new-level-name='{}'{}",
+					oldLevelName, newLevelName,
+					newSeedWritten == null ? "" : ", level-seed=" + newSeedWritten);
+
+			// Write marker with details so startup can back up the OLD world by name
+			java.nio.file.Path marker = runDir.resolve("hc_reset.flag");
+			java.util.Properties markerProps = new java.util.Properties();
+			markerProps.setProperty("requestedBy", "mod");
+			markerProps.setProperty("time", Long.toString(System.currentTimeMillis()));
+			markerProps.setProperty("old-level-name", oldLevelName);
+			markerProps.setProperty("new-level-name", newLevelName);
+			if (newSeedWritten != null) markerProps.setProperty("new-seed", newSeedWritten);
+			try (java.io.Writer w = Files.newBufferedWriter(marker)) {
+				markerProps.store(w, "HardcorePlus+ world rotation metadata");
+			}
+			LOGGER.info("Wrote hc_reset.flag at {} with rotation metadata", marker.toAbsolutePath());
 
 			boolean autoRestart = ConfigManager.getBoolean("auto_restart");
 			int delay = ConfigManager.getInt("restart_delay_seconds", 5);
@@ -305,5 +501,17 @@ public class Hardcoreplus implements ModInitializer {
 			PROCESSING.set(false);
 			LOGGER.debug("[hcp] performMassKill processing flag cleared");
 		}
+	}
+
+	// Replace characters that are illegal in Windows/macOS/Linux filenames and tidy up
+	private static String sanitizeName(String input) {
+		if (input == null) return "world_" + System.currentTimeMillis();
+		String t = input.replaceAll("[\\\\/:*?\"<>|]", "-");
+		t = t.trim();
+		// Windows forbids trailing spaces or dots in folder names
+		while (!t.isEmpty() && (t.endsWith(" ") || t.endsWith("."))) {
+			t = t.substring(0, t.length() - 1);
+		}
+		return t.isEmpty() ? ("world_" + System.currentTimeMillis()) : t;
 	}
 }

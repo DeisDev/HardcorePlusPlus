@@ -43,18 +43,20 @@ public class PlayerDeathMixin {
             }
 
             if (!isHardcore) return;
-            Hardcoreplus.LOGGER.debug("[hcp mixin] World is hardcore, proceeding to mass-kill");
-            // If already processing (we triggered reset), don't re-enter
-            if (!Hardcoreplus.PROCESSING.compareAndSet(false, true)) {
-                Hardcoreplus.LOGGER.debug("[hcp mixin] Reset already in progress; skipping re-entry");
-                return;
+            Hardcoreplus.LOGGER.debug("[hcp mixin] World is hardcore, proceeding to mass-kill then reset");
+
+            // Perform the mass-kill using the helper (it uses its own PROCESSING guard)
+            try {
+                Hardcoreplus.performMassKill(server);
+            } catch (Throwable t) {
+                Hardcoreplus.LOGGER.warn("[hcp mixin] performMassKill failed", t);
             }
 
             Hardcoreplus.LOGGER.info("[hcp mixin] All players dead in hardcore world — requesting reset and server stop");
             try {
                 Hardcoreplus.requestResetAndStop(server);
-            } finally {
-                Hardcoreplus.PROCESSING.set(false);
+            } catch (Throwable t) {
+                Hardcoreplus.LOGGER.error("[hcp mixin] requestResetAndStop failed", t);
             }
         } finally {
             Hardcoreplus.PROCESSING.set(false);
