@@ -1,6 +1,6 @@
-# HardcorePlusPlus
+# HardcorePlus+ 
 
-HardcorePlusPlus is a **server-side only** mod for Minecraft that raises the stakes of multiplayer hardcore worlds. When any player dies, the **entire world is deleted and a new one is automatically generated**—ensuring every death is truly game-changing!
+HardcorePlus+ is a **server-side only** mod for Minecraft that raises the stakes of multiplayer hardcore worlds. When any player dies, the **entire world is deleted and a new one is automatically generated**. The goal is for players to really think about their actions. 
 
 ## Features
 
