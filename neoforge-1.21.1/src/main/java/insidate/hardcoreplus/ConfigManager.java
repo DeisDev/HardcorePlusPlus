@@ -33,8 +33,14 @@ public class ConfigManager {
 
     public static void load() {
         try {
-            Path runDir = java.nio.file.Path.of("");
-            configPath = runDir.resolve("hardcoreplus.properties");
+            // Resolve config directory under the current run directory
+            Path runDir = java.nio.file.Path.of("").toAbsolutePath().normalize();
+            Path configDir = runDir.resolve("config");
+            try { if (!Files.exists(configDir)) Files.createDirectories(configDir); } catch (IOException ignored) {}
+
+            // Use config/hardcoreplus.properties by default (no legacy migration)
+            configPath = configDir.resolve("hardcoreplus.properties");
+
             if (!Files.exists(configPath)) {
                 props = defaults();
                 saveFormatted(props);
@@ -89,6 +95,9 @@ public class ConfigManager {
             if (KEY_COMMENTS.containsKey(k)) continue;
             sb.append(k).append("=").append(p.getProperty(k, "")).append("\n");
         }
-        Files.writeString(configPath, sb.toString());
+        if (configPath != null) {
+            try { Files.createDirectories(configPath.getParent()); } catch (IOException ignored) {}
+            Files.writeString(configPath, sb.toString());
+        }
     }
 }

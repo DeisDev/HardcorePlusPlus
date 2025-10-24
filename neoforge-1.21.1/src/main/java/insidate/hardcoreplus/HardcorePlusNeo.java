@@ -1,26 +1,5 @@
 package insidate.hardcoreplus;
 
-import com.mojang.brigadier.builder.LiteralArgumentBuilder;
-import com.mojang.brigadier.context.CommandContext;
-import net.minecraft.ChatFormatting;
-import net.minecraft.commands.CommandSourceStack;
-import net.minecraft.commands.Commands;
-import net.minecraft.network.chat.Component;
-import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.level.ServerPlayer;
-import net.neoforged.api.distmarker.Dist;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.Mod;
-import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
-import net.neoforged.neoforge.common.NeoForge;
-import net.neoforged.neoforge.event.RegisterCommandsEvent;
-import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
-import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
-import net.neoforged.neoforge.event.server.ServerStartedEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -33,6 +12,28 @@ import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+
+import net.minecraft.ChatFormatting;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.server.ServerAboutToStartEvent;
+import net.neoforged.neoforge.event.server.ServerStartedEvent;
 
 @Mod(HardcorePlusNeo.MOD_ID)
 public class HardcorePlusNeo {
@@ -53,6 +54,9 @@ public class HardcorePlusNeo {
         // Setup if needed
         modBus.addListener(this::onCommonSetup);
     }
+
+    // Reason for initiating a reset
+    private enum ResetReason { DEATH, COMMAND }
 
     private void onCommonSetup(FMLCommonSetupEvent evt) {
         LOGGER.info("HardcorePlus+ common setup (NeoForge)");
@@ -110,8 +114,9 @@ public class HardcorePlusNeo {
                         LOGGER.info("Moved old world to {}", backupTarget.toAbsolutePath());
                         moved = true;
                     } catch (IOException e) {
-                        LOGGER.warn("Atomic move failed; trying non-atomic", e);
-                        try { Files.move(worldDir, backupTarget); moved = true; } catch (IOException ex) { LOGGER.warn("Non-atomic move failed; copying", ex); }
+                        // This is common on Windows when files are locked; fallback paths handle it
+                        LOGGER.info("Atomic move failed; trying non-atomic (expected on Windows): {}", e.toString());
+                        try { Files.move(worldDir, backupTarget); moved = true; } catch (IOException ex) { LOGGER.info("Non-atomic move failed; copying (expected on Windows): {}", ex.toString()); }
                     }
                     if (!moved) {
                         try {
@@ -124,7 +129,7 @@ public class HardcorePlusNeo {
                                         if (src.getFileName().toString().equalsIgnoreCase("session.lock")) { LOGGER.info("Skipping session.lock"); return; }
                                         Files.copy(src, dest);
                                     }
-                                } catch (IOException ex) { LOGGER.warn("Error copying {} (continuing)", src); }
+                                } catch (IOException ex) { LOGGER.debug("Error copying {} (continuing): {}", src, ex.toString()); }
                             });
                             Files.walk(worldDir).sorted((a, b) -> b.compareTo(a)).forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored2) {} });
                             LOGGER.info("Copied old world to {} and deleted original", backupTarget.toAbsolutePath());
@@ -208,7 +213,7 @@ public class HardcorePlusNeo {
         sb.append("  /hcp time - Show current world time and real uptime\n");
         if (isOp) {
             sb.append("  /hcp masskill - Request mass-kill (confirm required)\n");
-            sb.append("  /hcp masskill confirm - Confirm mass-kill\n");
+            sb.append("  /hcp masskill confirm - Confirm mass-kill and schedule restart\n");
             sb.append("  /hcp reset - Schedule world rotation (confirm required)\n");
             sb.append("  /hcp reset confirm - Confirm rotation and stop server\n");
             sb.append("  /hcp reload - Reload config file\n");
@@ -243,9 +248,16 @@ public class HardcorePlusNeo {
         MinecraftServer server = ctx.getSource().getServer();
         String oldName = "world";
         try { Properties p = new Properties(); Path props = server.getServerDirectory().resolve("server.properties"); if (Files.exists(props)) { try (var in = Files.newInputStream(props)) { p.load(in); } oldName = Optional.ofNullable(p.getProperty("level-name")).orElse(oldName);} } catch (Throwable ignored) {}
-        // Prefer base name file if present
+        // Prefer base name file if present; strip any trailing time suffixes to avoid duplication
         String baseName = oldName;
-        try { Path base = server.getServerDirectory().resolve("hc_base_name.txt"); if (Files.exists(base)) { String tmp = Files.readString(base).trim(); if (!tmp.isEmpty()) baseName = tmp; } } catch (Throwable ignored) {}
+        try {
+            Path base = server.getServerDirectory().resolve("hc_base_name.txt");
+            if (Files.exists(base)) {
+                String tmp = Files.readString(base).trim();
+                if (!tmp.isEmpty()) baseName = tmp;
+            }
+            baseName = stripTimeSuffixes(baseName);
+        } catch (Throwable ignored) {}
         String timePattern = Optional.ofNullable(ConfigManager.get("time_format")).filter(s -> !s.isBlank()).orElse("HH-mm-ss_uuuu-MM-dd");
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern(timePattern).withZone(ZoneId.systemDefault());
         String timeStr = fmt.format(Instant.now());
@@ -280,7 +292,7 @@ public class HardcorePlusNeo {
 
     private int cmdResetConfirm(CommandContext<CommandSourceStack> ctx) {
         MinecraftServer server = ctx.getSource().getServer();
-        requestResetAndStop(server, ctx.getSource().getTextName());
+        requestResetAndStop(server, ResetReason.COMMAND, ctx.getSource().getTextName());
         ctx.getSource().sendSuccess(() -> Component.literal("Reset scheduled. Server will stop shortly."), false);
         return 1;
     }
@@ -295,7 +307,10 @@ public class HardcorePlusNeo {
         boolean hardcore = false; try { hardcore = server.getWorldData().isHardcore(); } catch (Throwable ignored) {}
         if (!hardcore) { ctx.getSource().sendSuccess(() -> Component.literal("World is not hardcore; aborting masskill."), false); return 0; }
         performMassKill(server);
-        ctx.getSource().sendSuccess(() -> Component.literal("Mass-kill executed."), false);
+        // After mass-kill, schedule a reset/restart using COMMAND reason to avoid "player has died" phrasing
+        try { requestResetAndStop(server, ResetReason.COMMAND, ctx.getSource().getTextName()); }
+        catch (Throwable t) { LOGGER.error("Failed to schedule reset after mass-kill", t); }
+        ctx.getSource().sendSuccess(() -> Component.literal("Mass-kill executed. Restart scheduled."), false);
         return 1;
     }
 
@@ -337,7 +352,7 @@ public class HardcorePlusNeo {
         if (PROCESSING.get()) return;
         LOGGER.info("[hcp] Player death detected in hardcore world; performing mass-kill and scheduling reset");
         try { performMassKill(server); } catch (Throwable t) { LOGGER.warn("performMassKill failed", t); }
-        try { requestResetAndStop(server, player.getGameProfile().getName()); } catch (Throwable t) { LOGGER.error("requestResetAndStop failed", t); }
+        try { requestResetAndStop(server, ResetReason.DEATH, player.getGameProfile().getName()); } catch (Throwable t) { LOGGER.error("requestResetAndStop failed", t); }
     }
 
     // Core operations
@@ -349,7 +364,7 @@ public class HardcorePlusNeo {
                 try {
                     if (!p.isDeadOrDying()) {
                         LOGGER.info("[hcp] Killing player: {}", p.getGameProfile().getName());
-                        try { p.kill(server.overworld()); } catch (Throwable t) { try { p.hurt(p.damageSources().fellOutOfWorld(), Float.MAX_VALUE); } catch (Throwable ignored) {} }
+                        try { p.kill(); } catch (Throwable t) { try { p.hurt(p.damageSources().fellOutOfWorld(), Float.MAX_VALUE); } catch (Throwable ignored) {} }
                     }
                 } catch (Throwable t) { LOGGER.warn("[hcp] Exception while attempting to kill {}", p.getGameProfile().getName(), t); }
             }
@@ -360,6 +375,11 @@ public class HardcorePlusNeo {
     }
 
     public static void requestResetAndStop(MinecraftServer server, String triggeringPlayerName) {
+        // Backwards-compat: default to DEATH reason when only a name is provided
+        requestResetAndStop(server, ResetReason.DEATH, triggeringPlayerName);
+    }
+
+    public static void requestResetAndStop(MinecraftServer server, ResetReason reason, String triggeringPlayerName) {
         if (server == null) return;
         try { if (!server.isDedicatedServer()) return; } catch (Throwable ignored) { return; }
         try { ConfigManager.reload(); } catch (Throwable ignored) {}
@@ -379,14 +399,25 @@ public class HardcorePlusNeo {
             }
             String dur = formatDuration(Math.max(0L, System.currentTimeMillis() - Math.max(0L, startMs)));
             try {
-                Component msg = Component.empty()
-                        .append(Component.literal(name).withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD))
-                        .append(Component.literal(" has died. ").withStyle(ChatFormatting.RED))
-                        .append(Component.literal("World lasted ").withStyle(ChatFormatting.GRAY))
-                        .append(Component.literal(dur).withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD))
-                        .append(Component.literal(". Restart in ").withStyle(ChatFormatting.GRAY))
-                        .append(Component.literal(Integer.toString(delay)).withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD))
-                        .append(Component.literal(" seconds.").withStyle(ChatFormatting.GRAY));
+                Component msg;
+                if (reason == ResetReason.DEATH) {
+                    msg = Component.empty()
+                            .append(Component.literal(name).withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD))
+                            .append(Component.literal(" has died. ").withStyle(ChatFormatting.RED))
+                            .append(Component.literal("World lasted ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(dur).withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD))
+                            .append(Component.literal(". Restart in ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(Integer.toString(delay)).withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD))
+                            .append(Component.literal(" seconds.").withStyle(ChatFormatting.GRAY));
+                } else { // COMMAND
+                    msg = Component.empty()
+                            .append(Component.literal("Restart Triggered. ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD))
+                            .append(Component.literal("World lasted ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(dur).withStyle(ChatFormatting.AQUA, ChatFormatting.BOLD))
+                            .append(Component.literal(". Restart in ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(Integer.toString(delay)).withStyle(ChatFormatting.YELLOW, ChatFormatting.BOLD))
+                            .append(Component.literal(" seconds.").withStyle(ChatFormatting.GRAY));
+                }
                 server.getPlayerList().broadcastSystemMessage(msg, false);
             } catch (Throwable t) { LOGGER.warn("Failed to broadcast restart message", t); }
 
@@ -396,12 +427,23 @@ public class HardcorePlusNeo {
             String oldLevelName = "world";
             if (Files.exists(propsFile)) { try (var in = Files.newInputStream(propsFile)) { p.load(in); oldLevelName = Optional.ofNullable(p.getProperty("level-name")).orElse(oldLevelName); } }
 
-            // Stable base name
+            // Stable base name (normalize by stripping trailing time suffixes if present)
             Path baseFile = runDir.resolve("hc_base_name.txt");
             String baseLevelName = oldLevelName;
             try {
-                if (Files.exists(baseFile)) { String s = Files.readString(baseFile).trim(); if (!s.isEmpty()) baseLevelName = s; }
-                else { Files.writeString(baseFile, baseLevelName); LOGGER.info("Saved base level-name '{}' to {}", baseLevelName, baseFile.toAbsolutePath()); }
+                if (Files.exists(baseFile)) {
+                    String s = Files.readString(baseFile).trim();
+                    if (!s.isEmpty()) baseLevelName = s;
+                    String cleaned = stripTimeSuffixes(baseLevelName);
+                    if (!cleaned.equals(baseLevelName)) {
+                        baseLevelName = cleaned;
+                        try { Files.writeString(baseFile, baseLevelName); LOGGER.info("Normalized base level-name to '{}' in {}", baseLevelName, baseFile.toAbsolutePath()); } catch (Throwable ignored3) {}
+                    }
+                } else {
+                    baseLevelName = stripTimeSuffixes(baseLevelName);
+                    Files.writeString(baseFile, baseLevelName);
+                    LOGGER.info("Saved base level-name '{}' to {}", baseLevelName, baseFile.toAbsolutePath());
+                }
             } catch (Throwable t) { LOGGER.warn("Failed to read/write base level-name; using current", t); baseLevelName = oldLevelName; }
 
             String timePattern = Optional.ofNullable(ConfigManager.get("time_format")).filter(s -> !s.isBlank()).orElse("HH-mm-ss_uuuu-MM-dd");
@@ -464,6 +506,18 @@ public class HardcorePlusNeo {
         t = t.trim();
         while (!t.isEmpty() && (t.endsWith(" ") || t.endsWith("."))) t = t.substring(0, t.length() - 1);
         return t.isEmpty() ? ("world_" + System.currentTimeMillis()) : t;
+    }
+
+    // Remove repeated trailing timestamp segments like "_HH-mm-ss_yyyy-MM-dd" to avoid names like
+    // world_02-38-21_2025-10-24_02-52-54_2025-10-24
+    private static String stripTimeSuffixes(String name) {
+        if (name == null || name.isBlank()) return name;
+        String out = name;
+        String regex = "(?:_\\d{2}-\\d{2}-\\d{2}_\\d{4}-\\d{2}-\\d{2})+$";
+        out = out.replaceFirst(regex, "");
+        // Clean any trailing underscores left behind
+        while (out.endsWith("_")) out = out.substring(0, out.length() - 1);
+        return out;
     }
 
     private static String formatDuration(long millis) {

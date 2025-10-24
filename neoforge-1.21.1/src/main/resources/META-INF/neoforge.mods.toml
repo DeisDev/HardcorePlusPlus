@@ -1,4 +1,7 @@
 # Generated for HardcorePlus+ NeoForge port
+# Non-mod-specific properties
+modLoader="javafml"
+loaderVersion="[1,)"
 license="${mod_license}"
 
 [[mods]]
