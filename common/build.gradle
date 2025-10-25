@@ -1,0 +1,26 @@
+plugins {
+    id 'java-library'
+}
+
+group = rootProject.findProperty('maven_group') ?: 'insidate.hardcoreplus'
+version = rootProject.findProperty('mod_version') ?: '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Align with NeoForge's strict dependency (2.0.9) to avoid conflict across subprojects
+    api 'org.slf4j:slf4j-api:2.0.9'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

@@ -4,27 +4,45 @@
 # against bad commits.
 
 name: build
-on: [pull_request, push]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: checkout repository
         uses: actions/checkout@v4
       - name: validate gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
+      - name: setup gradle caching
+        uses: gradle/actions/setup-gradle@v4
       - name: setup jdk
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'microsoft'
-      - name: make gradle wrapper executable
-        run: chmod +x ./gradlew
       - name: build
-        run: ./gradlew build
-      - name: capture build artifacts
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon build
+      - name: capture build artifacts (Fabric)
         uses: actions/upload-artifact@v4
         with:
-          name: Artifacts
-          path: build/libs/
+          name: Fabric-${{ matrix.os }}
+          path: |
+            fabric/build/libs/*.jar
+      - name: capture build artifacts (NeoForge)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeoForge-${{ matrix.os }}
+          path: |
+            neoforge/build/libs/*.jar

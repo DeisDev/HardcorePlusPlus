@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "hardcoreplus",
+  "version": "${version}",
+  "name": "HardcorePlus",
+  "description": "Makes multiplayer Hardcore more punishing by killing all players on death.",
+  "authors": ["Insidate"],
+  "contact": {
+    "homepage": "https://fabricmc.net/",
+    "sources": "https://github.com/DeisDev/HardcorePlusPlus"
+  },
+  "license": "MIT",
+  "icon": "assets/hardcoreplus/icon.png",
+  "environment": "server",
+  "entrypoints": { "main": ["insidate.hardcoreplus.Hardcoreplus"] },
+  "mixins": ["hardcoreplus.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.17.3",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

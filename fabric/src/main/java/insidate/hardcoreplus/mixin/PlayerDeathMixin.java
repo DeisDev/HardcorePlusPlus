@@ -11,10 +11,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ServerPlayerEntity.class)
 public class PlayerDeathMixin {
-    // Use mod-wide guard to prevent re-entrant kills while we are already processing the mass-death
-    // Shared with the debug command
-    // Note: Hardcoreplus.PROCESSING ensures a single shared guard across classes
-
     // Inject into the start of the onDeath method for server players
     @Inject(at = @At("HEAD"), method = "onDeath(Lnet/minecraft/entity/damage/DamageSource;)V")
     private void onDeath(net.minecraft.entity.damage.DamageSource source, CallbackInfo ci) {
@@ -44,7 +40,6 @@ public class PlayerDeathMixin {
         try {
             boolean isHardcore = false;
             if (server.getSaveProperties() != null) {
-                // SaveProperties has an isHardcore() method in current mappings
                 isHardcore = server.getSaveProperties().isHardcore();
             }
 

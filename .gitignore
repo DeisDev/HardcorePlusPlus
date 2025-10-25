@@ -1,7 +1,12 @@
-# gradle
+############################################################
+# Gradle and build outputs
+############################################################
 
+# Root and subprojects
 .gradle/
+**/.gradle/
 build/
+**/build/
 out/
 classes/
 
@@ -28,13 +33,28 @@ bin/
 
 *.DS_Store
 
-# fabric
+############################################################
+# Fabric/Forge/NeoForge dev runtimes
+############################################################
 
 run/
+**/run/
 
-# java
+############################################################
+# Java crash logs
+############################################################
 
 hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+############################################################
+# Misc project artifacts
+############################################################
+
+# Local Yarn mapping dumps or jars (Loom will fetch mappings)
+yarn-*.jar
+
+# IDE configs
+!.vscode/extensions.json

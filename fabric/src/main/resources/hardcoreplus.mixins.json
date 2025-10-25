@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "package": "insidate.hardcoreplus.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["PlayerDeathMixin"],
+  "injectors": { "defaultRequire": 1 },
+  "overwrites": { "requireAnnotations": true }
+}
